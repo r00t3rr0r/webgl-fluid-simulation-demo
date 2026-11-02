@@ -69,8 +69,14 @@ let config = {
     SPLAT_FORCE: 6000,
     SHADING: true,
     COLORFUL: true,
+    USE_FIXED_FLUID_COLOR: false,
+    FIXED_FLUID_COLOR: { r: 64, g: 170, b: 255 },
     COLOR_UPDATE_SPEED: 10,
     PAUSED: false,
+    CURSOR_MODE: 'hover',
+    FLUID_PROFILE: 'custom',
+    SMOKE_BRIGHTNESS: 1.0,
+    SMOKE_INTENSITY: 1.0,
     BACK_COLOR: { r: 0, g: 0, b: 0 },
     TRANSPARENT: false,
     BLOOM: true,
@@ -82,7 +88,120 @@ let config = {
     SUNRAYS: true,
     SUNRAYS_RESOLUTION: 196,
     SUNRAYS_WEIGHT: 1.0,
+    AUDIO_SOURCE: 'system',
+    AUDIO_SENSITIVITY: 1.0,
 }
+
+const fluidProfiles = {
+    custom: {
+        DENSITY_DISSIPATION: 1.0,
+        VELOCITY_DISSIPATION: 0.2,
+        PRESSURE: 0.8,
+        CURL: 30,
+        SPLAT_RADIUS: 0.25,
+        SPLAT_FORCE: 6000,
+        COLORFUL: true,
+        BLOOM: true,
+        BLOOM_INTENSITY: 0.8,
+        BLOOM_THRESHOLD: 0.6,
+        SUNRAYS: true,
+        SUNRAYS_WEIGHT: 1.0,
+        color: null,
+    },
+    smoke: {
+        DENSITY_DISSIPATION: 0.75,
+        VELOCITY_DISSIPATION: 0.45,
+        PRESSURE: 0.9,
+        CURL: 42,
+        SPLAT_RADIUS: 0.2,
+        SPLAT_FORCE: 4200,
+        COLORFUL: false,
+        BLOOM: true,
+        BLOOM_INTENSITY: 1.15,
+        BLOOM_THRESHOLD: 0.35,
+        SUNRAYS: true,
+        SUNRAYS_WEIGHT: 0.9,
+        color: { r: 0.62, g: 0.66, b: 0.72 },
+    },
+    water: {
+        DENSITY_DISSIPATION: 0.08,
+        VELOCITY_DISSIPATION: 0.06,
+        PRESSURE: 0.98,
+        CURL: 5,
+        SPLAT_RADIUS: 0.12,
+        SPLAT_FORCE: 7600,
+        COLORFUL: false,
+        BLOOM: false,
+        BLOOM_INTENSITY: 0.35,
+        BLOOM_THRESHOLD: 0.65,
+        SUNRAYS: false,
+        SUNRAYS_WEIGHT: 0.6,
+        color: { r: 0.025, g: 0.24, b: 0.85 },
+    },
+    ink: {
+        DENSITY_DISSIPATION: 0.28,
+        VELOCITY_DISSIPATION: 0.16,
+        PRESSURE: 0.9,
+        CURL: 24,
+        SPLAT_RADIUS: 0.28,
+        SPLAT_FORCE: 5600,
+        COLORFUL: false,
+        BLOOM: true,
+        BLOOM_INTENSITY: 1.35,
+        BLOOM_THRESHOLD: 0.4,
+        SUNRAYS: false,
+        SUNRAYS_WEIGHT: 0.7,
+        color: { r: 0.82, g: 0.055, b: 0.32 },
+    },
+    neon: {
+        DENSITY_DISSIPATION: 0.42,
+        VELOCITY_DISSIPATION: 0.22,
+        PRESSURE: 0.86,
+        CURL: 46,
+        SPLAT_RADIUS: 0.22,
+        SPLAT_FORCE: 6600,
+        COLORFUL: true,
+        BLOOM: true,
+        BLOOM_INTENSITY: 1.8,
+        BLOOM_THRESHOLD: 0.3,
+        SUNRAYS: true,
+        SUNRAYS_WEIGHT: 0.95,
+        color: null,
+    },
+    gelatin: {
+        DENSITY_DISSIPATION: 0.06,
+        VELOCITY_DISSIPATION: 0.9,
+        PRESSURE: 0.98,
+        CURL: 2,
+        SPLAT_RADIUS: 0.3,
+        SPLAT_FORCE: 5200,
+        COLORFUL: false,
+        BLOOM: true,
+        BLOOM_INTENSITY: 0.7,
+        BLOOM_THRESHOLD: 0.55,
+        SUNRAYS: false,
+        SUNRAYS_WEIGHT: 0.5,
+        color: { r: 0.72, g: 0.24, b: 0.3 },
+    },
+    evolving: {
+        DENSITY_DISSIPATION: 0.38,
+        VELOCITY_DISSIPATION: 0.2,
+        PRESSURE: 0.88,
+        CURL: 28,
+        SPLAT_RADIUS: 0.2,
+        SPLAT_FORCE: 5200,
+        COLORFUL: true,
+        BLOOM: true,
+        BLOOM_INTENSITY: 1.1,
+        BLOOM_THRESHOLD: 0.42,
+        SUNRAYS: true,
+        SUNRAYS_WEIGHT: 0.72,
+        color: null,
+    },
+};
+let activeProfileColor = null;
+let gelRebounds = [];
+let lastGelReboundQueued = 0;
 
 function pointerPrototype () {
     this.id = -1;
@@ -94,12 +213,29 @@ function pointerPrototype () {
     this.deltaY = 0;
     this.down = false;
     this.moved = false;
+    this.hasPosition = false;
+    this.lastMoveTime = 0;
     this.color = [30, 0, 300];
 }
 
 let pointers = [];
 let splatStack = [];
 pointers.push(new pointerPrototype());
+let audioStream = null;
+let audioContext = null;
+let audioAnalyser = null;
+let audioSamples = null;
+let audioFrequencies = null;
+let previousAudioFrequencies = null;
+let audioLevel = 0;
+let audioFluxBaseline = 0;
+let audioMeter = { level: 0 };
+let lastAudioSplatTime = 0;
+let lastAudioSplatPosition = null;
+let audioToneStates = Object.create(null);
+let audioGlowStartTime = 0;
+let audioGlowStrength = 0;
+let audioController = null;
 
 const { gl, ext } = getWebGLContext(canvas);
 
@@ -205,31 +341,102 @@ function supportRenderTextureFormat (gl, internalFormat, format, type) {
     return status == gl.FRAMEBUFFER_COMPLETE;
 }
 
+function applyFluidProfile (name) {
+    const profile = fluidProfiles[name];
+    if (!profile) return;
+
+    Object.keys(profile).forEach(key => {
+        if (key !== 'color')
+            config[key] = profile[key];
+    });
+    activeProfileColor = profile.color;
+    pointers.forEach(pointer => {
+        pointer.color = generateColor();
+    });
+    audioToneStates = Object.create(null);
+    lastAudioSplatPosition = null;
+    gelRebounds = [];
+    lastGelReboundQueued = 0;
+    if (name === 'evolving')
+        updateEvolvingProfile();
+    updateKeywords();
+}
+
+function updateEvolvingProfile () {
+    if (config.FLUID_PROFILE !== 'evolving') return;
+
+    const time = performance.now() / 1000;
+    const wave = (speed, phase = 0) => 0.5 + 0.5 * Math.sin(time * speed + phase);
+    config.DENSITY_DISSIPATION = 0.12 + wave(0.31, 0.8) * 0.72;
+    config.VELOCITY_DISSIPATION = 0.05 + wave(0.23, 1.7) * 0.65;
+    config.PRESSURE = 0.72 + wave(0.17, 0.3) * 0.26;
+    config.CURL = Math.round(8 + wave(0.29, 2.1) * 42);
+    config.SPLAT_RADIUS = 0.12 + wave(0.19, 1.2) * 0.24;
+    config.SPLAT_FORCE = 3600 + wave(0.21, 0.5) * 5200;
+    config.BLOOM_INTENSITY = 0.45 + wave(0.34, 1.4) * 1.45;
+    config.BLOOM_THRESHOLD = 0.25 + wave(0.27, 0.9) * 0.5;
+    config.SUNRAYS_WEIGHT = 0.35 + wave(0.16, 2.3) * 0.6;
+    activeProfileColor = HSVtoRGB((time * 0.075) % 1, 0.85, 0.35);
+}
+
+function updateSmokeColors () {
+    if (config.FLUID_PROFILE !== 'smoke') return;
+    updateFluidColors();
+}
+
+function enableFixedFluidColor () {
+    config.USE_FIXED_FLUID_COLOR = true;
+    updateFluidColors();
+}
+
+function updateFluidColors () {
+    pointers.forEach(pointer => {
+        pointer.color = generateColor();
+    });
+    audioToneStates = Object.create(null);
+}
+
+function getProfileIntensity () {
+    return config.FLUID_PROFILE === 'smoke' ? config.SMOKE_INTENSITY : 1;
+}
+
 function startGUI () {
     var gui = new dat.GUI({ width: 300 });
+    gui.add(config, 'FLUID_PROFILE', { 'custom': 'custom', 'smoke': 'smoke', 'water': 'water', 'ink': 'ink', 'neon': 'neon', 'evolving': 'evolving', 'ballistic gelatin': 'gelatin' }).name('fluid profile').onChange(applyFluidProfile);
     gui.add(config, 'DYE_RESOLUTION', { 'high': 1024, 'medium': 512, 'low': 256, 'very low': 128 }).name('quality').onFinishChange(initFramebuffers);
     gui.add(config, 'SIM_RESOLUTION', { '32': 32, '64': 64, '128': 128, '256': 256 }).name('sim resolution').onFinishChange(initFramebuffers);
-    gui.add(config, 'DENSITY_DISSIPATION', 0, 4.0).name('density diffusion');
-    gui.add(config, 'VELOCITY_DISSIPATION', 0, 4.0).name('velocity diffusion');
-    gui.add(config, 'PRESSURE', 0.0, 1.0).name('pressure');
-    gui.add(config, 'CURL', 0, 50).name('vorticity').step(1);
-    gui.add(config, 'SPLAT_RADIUS', 0.01, 1.0).name('splat radius');
+    gui.add(config, 'DENSITY_DISSIPATION', 0, 4.0).name('density diffusion').listen();
+    gui.add(config, 'VELOCITY_DISSIPATION', 0, 4.0).name('velocity diffusion').listen();
+    gui.add(config, 'PRESSURE', 0.0, 1.0).name('pressure').listen();
+    gui.add(config, 'CURL', 0, 50).name('vorticity').step(1).listen();
+    gui.add(config, 'SPLAT_RADIUS', 0.01, 1.0).name('splat radius').listen();
     gui.add(config, 'SHADING').name('shading').onFinishChange(updateKeywords);
-    gui.add(config, 'COLORFUL').name('colorful');
+    gui.add(config, 'COLORFUL').name('colorful').listen().onFinishChange(updateKeywords);
+    gui.add(config, 'USE_FIXED_FLUID_COLOR').name('fixed color').listen().onChange(updateFluidColors);
+    gui.addColor(config, 'FIXED_FLUID_COLOR').name('fluid color').listen().onChange(enableFixedFluidColor);
     gui.add(config, 'PAUSED').name('paused').listen();
+    gui.add(config, 'CURSOR_MODE', { 'always': 'hover', 'button press': 'press' }).name('cursor movement');
+    gui.add(config, 'SMOKE_BRIGHTNESS', 0.2, 3.0).name('smoke brightness').listen().onChange(updateSmokeColors);
+    gui.add(config, 'SMOKE_INTENSITY', 0.2, 3.0).name('smoke intensity').listen();
 
     gui.add({ fun: () => {
         splatStack.push(parseInt(Math.random() * 20) + 5);
     } }, 'fun').name('Random splats');
 
+    let audioFolder = gui.addFolder('Audio input');
+    audioFolder.add(config, 'AUDIO_SOURCE', { 'system audio': 'system', 'microphone': 'microphone' }).name('source');
+    audioController = audioFolder.add({ fun: () => { toggleAudioCapture(); } }, 'fun').name('Start audio response');
+    audioFolder.add(config, 'AUDIO_SENSITIVITY', 0.2, 3.0).name('sensitivity');
+    audioFolder.add(audioMeter, 'level', 0, 1).name('input level').listen();
+
     let bloomFolder = gui.addFolder('Bloom');
-    bloomFolder.add(config, 'BLOOM').name('enabled').onFinishChange(updateKeywords);
-    bloomFolder.add(config, 'BLOOM_INTENSITY', 0.1, 2.0).name('intensity');
-    bloomFolder.add(config, 'BLOOM_THRESHOLD', 0.0, 1.0).name('threshold');
+    bloomFolder.add(config, 'BLOOM').name('enabled').listen().onFinishChange(updateKeywords);
+    bloomFolder.add(config, 'BLOOM_INTENSITY', 0.1, 2.0).name('intensity').listen();
+    bloomFolder.add(config, 'BLOOM_THRESHOLD', 0.0, 1.0).name('threshold').listen();
 
     let sunraysFolder = gui.addFolder('Sunrays');
-    sunraysFolder.add(config, 'SUNRAYS').name('enabled').onFinishChange(updateKeywords);
-    sunraysFolder.add(config, 'SUNRAYS_WEIGHT', 0.3, 1.0).name('weight');
+    sunraysFolder.add(config, 'SUNRAYS').name('enabled').listen().onFinishChange(updateKeywords);
+    sunraysFolder.add(config, 'SUNRAYS_WEIGHT', 0.3, 1.0).name('weight').listen();
 
     let captureFolder = gui.addFolder('Capture');
     captureFolder.addColor(config, 'BACK_COLOR').name('background color');
@@ -282,6 +489,175 @@ function startGUI () {
 
 function isMobile () {
     return /Mobi|Android/i.test(navigator.userAgent);
+}
+
+async function toggleAudioCapture () {
+    if (audioStream) {
+        stopAudioCapture();
+        return;
+    }
+
+    const captureMethod = config.AUDIO_SOURCE === 'microphone' ? 'getUserMedia' : 'getDisplayMedia';
+    if (!navigator.mediaDevices || !navigator.mediaDevices[captureMethod]) {
+        audioController.name('Audio capture unavailable');
+        return;
+    }
+
+    audioController.name(config.AUDIO_SOURCE === 'microphone' ? 'Waiting for microphone...' : 'Choose audio in share picker...');
+    try {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        await audioContext.resume();
+        audioStream = config.AUDIO_SOURCE === 'microphone'
+            ? await navigator.mediaDevices.getUserMedia({ audio: true })
+            : await navigator.mediaDevices.getDisplayMedia({
+                video: true,
+                audio: { suppressLocalAudioPlayback: false },
+                systemAudio: 'include'
+            });
+        if (audioStream.getAudioTracks().length === 0) {
+            stopAudioCapture();
+            audioController.name('No audio shared - retry');
+            return;
+        }
+
+        await audioContext.resume();
+        audioAnalyser = audioContext.createAnalyser();
+        audioAnalyser.fftSize = 4096;
+        audioAnalyser.smoothingTimeConstant = 0.75;
+        audioSamples = new Uint8Array(audioAnalyser.fftSize);
+        audioFrequencies = new Uint8Array(audioAnalyser.frequencyBinCount);
+        previousAudioFrequencies = new Uint8Array(audioAnalyser.frequencyBinCount);
+        audioFluxBaseline = 0;
+        audioContext.createMediaStreamSource(audioStream).connect(audioAnalyser);
+        audioStream.getTracks().forEach(track => {
+            track.addEventListener('ended', stopAudioCapture, { once: true });
+        });
+        audioController.name('Stop audio response');
+    } catch (error) {
+        stopAudioCapture();
+        audioController.name('Start audio response');
+    }
+}
+
+function stopAudioCapture () {
+    const stream = audioStream;
+    audioStream = null;
+    audioAnalyser = null;
+    audioSamples = null;
+    audioFrequencies = null;
+    previousAudioFrequencies = null;
+    if (stream)
+        stream.getTracks().forEach(track => track.stop());
+    audioLevel = 0;
+    audioFluxBaseline = 0;
+    audioMeter.level = 0;
+    if (audioContext) {
+        audioContext.close();
+        audioContext = null;
+    }
+    if (audioController)
+        audioController.name('Start audio response');
+}
+
+function updateAudioReaction () {
+    if (!audioAnalyser || !audioSamples || !audioFrequencies || !previousAudioFrequencies) return;
+
+    audioAnalyser.getByteTimeDomainData(audioSamples);
+    let sum = 0;
+    for (let i = 0; i < audioSamples.length; i++) {
+        const sample = (audioSamples[i] - 128) / 128;
+        sum += sample * sample;
+    }
+    audioLevel = Math.max(Math.sqrt(sum / audioSamples.length), audioLevel * 0.9);
+    audioMeter.level = audioLevel;
+
+    audioAnalyser.getByteFrequencyData(audioFrequencies);
+    let spectralFlux = 0;
+    const fluxBinCount = Math.min(audioFrequencies.length, Math.floor(1200 * audioAnalyser.fftSize / audioContext.sampleRate));
+    for (let i = 1; i < fluxBinCount; i++) {
+        const current = audioFrequencies[i] / 255;
+        const previous = previousAudioFrequencies[i] / 255;
+        spectralFlux += Math.max(0, current - previous);
+        previousAudioFrequencies[i] = audioFrequencies[i];
+    }
+    spectralFlux /= Math.sqrt(fluxBinCount - 1);
+
+    const now = performance.now();
+    const fluxThreshold = Math.max(0.012, audioFluxBaseline * 1.4);
+    const beat = spectralFlux > fluxThreshold && audioLevel > 0.008 / config.AUDIO_SENSITIVITY;
+    audioFluxBaseline = audioFluxBaseline * 0.92 + spectralFlux * 0.08;
+    if (!beat || now - lastAudioSplatTime < 100) return;
+
+    const minToneBin = Math.max(1, Math.floor(80 * audioAnalyser.fftSize / audioContext.sampleRate));
+    const maxToneBin = Math.min(audioFrequencies.length, Math.ceil(1800 * audioAnalyser.fftSize / audioContext.sampleRate));
+    let peakBin = minToneBin;
+    for (let i = minToneBin + 1; i < maxToneBin; i++) {
+        if (audioFrequencies[i] > audioFrequencies[peakBin])
+            peakBin = i;
+    }
+    const peakFrequency = peakBin * audioContext.sampleRate / audioAnalyser.fftSize;
+    const midiNote = Math.round(69 + 12 * Math.log2(peakFrequency / 440));
+    const toneKey = audioFrequencies[peakBin] >= 24 ? String(midiNote) : 'unpitched';
+    let toneState = audioToneStates[toneKey];
+    if (!toneState) {
+        let position;
+        for (let attempt = 0; attempt < 12; attempt++) {
+            position = { x: Math.random(), y: Math.random() };
+            if (!lastAudioSplatPosition || Math.hypot(position.x - lastAudioSplatPosition.x, position.y - lastAudioSplatPosition.y) >= 0.28)
+                break;
+        }
+        lastAudioSplatPosition = position;
+        toneState = { position, color: generateToneColor(midiNote), reinforcement: 0, lastTriggered: now };
+        audioToneStates[toneKey] = toneState;
+    } else {
+        const timeSinceTone = now - toneState.lastTriggered;
+        toneState.reinforcement = Math.min(4, toneState.reinforcement * Math.exp(-timeSinceTone / 4000) + 1);
+        toneState.lastTriggered = now;
+    }
+    const repeatStrength = Math.min(1, toneState.reinforcement / 4);
+
+    const pointer = pointers[0];
+    let directionX = pointer.deltaX;
+    let directionY = pointer.deltaY;
+    const directionLength = Math.hypot(directionX, directionY);
+    if (directionLength > 0.0005 && now - pointer.lastMoveTime < 1000) {
+        directionX /= directionLength;
+        directionY /= directionLength;
+    } else {
+        const angle = Math.random() * Math.PI * 2;
+        directionX = Math.cos(angle);
+        directionY = Math.sin(angle);
+    }
+    const beatStrength = Math.min(1, (spectralFlux - fluxThreshold) * 10);
+    const volumeStrength = Math.min(1, audioLevel * 3);
+    const force = Math.min(9000, (1400 + beatStrength * 4000 + volumeStrength * 1800 + repeatStrength * 2200) * config.AUDIO_SENSITIVITY * getProfileIntensity());
+    const activeGlow = audioGlowStrength * Math.max(0, 1 - (now - audioGlowStartTime) / 1000);
+    audioGlowStrength = Math.max(activeGlow, 1.2 + beatStrength * 1.2 + volumeStrength * 0.8 + repeatStrength * 1.2);
+    audioGlowStartTime = now;
+    const colorBoost = 3 + beatStrength * 2.5 + volumeStrength + repeatStrength * 2.5;
+    const color = {
+        r: toneState.color.r * colorBoost,
+        g: toneState.color.g * colorBoost,
+        b: toneState.color.b * colorBoost
+    };
+    splat(toneState.position.x, toneState.position.y, directionX * force, directionY * force, color);
+    lastAudioSplatTime = now;
+}
+
+function generateToneColor (midiNote) {
+    if (config.USE_FIXED_FLUID_COLOR)
+        return generateColor();
+
+    const pitchClass = (midiNote % 12 + 12) % 12;
+    const octave = Math.floor(midiNote / 12);
+    const hue = (pitchClass / 12 + (octave % 4) * 0.055) % 1;
+    const color = HSVtoRGB(hue, 0.92, 1);
+    const brightness = 0.15 * (config.FLUID_PROFILE === 'smoke' ? config.SMOKE_BRIGHTNESS : 1);
+    return {
+        r: color.r * brightness,
+        g: color.g * brightness,
+        b: color.b * brightness
+    };
 }
 
 function captureScreenshot () {
@@ -559,6 +935,8 @@ const displayShaderSource = `
     uniform sampler2D uBloom;
     uniform sampler2D uSunrays;
     uniform sampler2D uDithering;
+    uniform vec3 uFixedColor;
+    uniform float uFixedColorEnabled;
     uniform vec2 ditherScale;
     uniform vec2 texelSize;
 
@@ -586,6 +964,11 @@ const displayShaderSource = `
         c *= diffuse;
     #endif
 
+        if (uFixedColorEnabled > 0.5) {
+            float dyeLevel = max(c.r, max(c.g, c.b));
+            c = uFixedColor * dyeLevel;
+        }
+
     #ifdef BLOOM
         vec3 bloom = texture2D(uBloom, vUv).rgb;
     #endif
@@ -602,6 +985,10 @@ const displayShaderSource = `
         float noise = texture2D(uDithering, vUv * ditherScale).r;
         noise = noise * 2.0 - 1.0;
         bloom += noise / 255.0;
+    #ifdef COLORFUL
+        float bloomLuma = dot(bloom, vec3(0.299, 0.587, 0.114));
+        bloom = max(mix(vec3(bloomLuma), bloom, 1.55), vec3(0.0));
+    #endif
         bloom = linearToGamma(bloom);
         c += bloom;
     #endif
@@ -617,11 +1004,17 @@ const bloomPrefilterShader = compileShader(gl.FRAGMENT_SHADER, `
 
     varying vec2 vUv;
     uniform sampler2D uTexture;
+    uniform vec3 uFixedColor;
+    uniform float uFixedColorEnabled;
     uniform vec3 curve;
     uniform float threshold;
 
     void main () {
         vec3 c = texture2D(uTexture, vUv).rgb;
+        if (uFixedColorEnabled > 0.5) {
+            float dyeLevel = max(c.r, max(c.g, c.b));
+            c = uFixedColor * dyeLevel;
+        }
         float br = max(c.r, max(c.g, c.b));
         float rq = clamp(br - curve.x, 0.0, curve.y);
         rq = curve.z * rq * rq;
@@ -1162,6 +1555,7 @@ function updateKeywords () {
     if (config.SHADING) displayKeywords.push("SHADING");
     if (config.BLOOM) displayKeywords.push("BLOOM");
     if (config.SUNRAYS) displayKeywords.push("SUNRAYS");
+    if (config.COLORFUL) displayKeywords.push("COLORFUL");
     displayMaterial.setKeywords(displayKeywords);
 }
 
@@ -1177,7 +1571,9 @@ function update () {
     const dt = calcDeltaTime();
     if (resizeCanvas())
         initFramebuffers();
+    updateEvolvingProfile();
     updateColors(dt);
+    updateAudioReaction();
     applyInputs();
     if (!config.PAUSED)
         step(dt);
@@ -1226,6 +1622,21 @@ function applyInputs () {
             splatPointer(p);
         }
     });
+    applyGelRebounds();
+}
+
+function applyGelRebounds () {
+    if (config.FLUID_PROFILE !== 'gelatin') {
+        gelRebounds = [];
+        return;
+    }
+
+    const now = performance.now();
+    for (let i = gelRebounds.length - 1; i >= 0; i--) {
+        if (now < gelRebounds[i].time) continue;
+        const rebound = gelRebounds.splice(i, 1)[0];
+        splat(rebound.x, rebound.y, rebound.dx, rebound.dy, null, false);
+    }
 }
 
 function step (dt) {
@@ -1333,6 +1744,9 @@ function drawDisplay (target) {
     let height = target == null ? gl.drawingBufferHeight : target.height;
 
     displayMaterial.bind();
+    const fixedColor = normalizeColor(config.FIXED_FLUID_COLOR);
+    gl.uniform3f(displayMaterial.uniforms.uFixedColor, fixedColor.r, fixedColor.g, fixedColor.b);
+    gl.uniform1f(displayMaterial.uniforms.uFixedColorEnabled, config.USE_FIXED_FLUID_COLOR ? 1 : 0);
     if (config.SHADING)
         gl.uniform2f(displayMaterial.uniforms.texelSize, 1.0 / width, 1.0 / height);
     gl.uniform1i(displayMaterial.uniforms.uTexture, dye.read.attach(0));
@@ -1355,6 +1769,9 @@ function applyBloom (source, destination) {
 
     gl.disable(gl.BLEND);
     bloomPrefilterProgram.bind();
+    const fixedColor = normalizeColor(config.FIXED_FLUID_COLOR);
+    gl.uniform3f(bloomPrefilterProgram.uniforms.uFixedColor, fixedColor.r, fixedColor.g, fixedColor.b);
+    gl.uniform1f(bloomPrefilterProgram.uniforms.uFixedColorEnabled, config.USE_FIXED_FLUID_COLOR ? 1 : 0);
     let knee = config.BLOOM_THRESHOLD * config.BLOOM_SOFT_KNEE + 0.0001;
     let curve0 = config.BLOOM_THRESHOLD - knee;
     let curve1 = knee * 2;
@@ -1389,7 +1806,9 @@ function applyBloom (source, destination) {
     bloomFinalProgram.bind();
     gl.uniform2f(bloomFinalProgram.uniforms.texelSize, last.texelSizeX, last.texelSizeY);
     gl.uniform1i(bloomFinalProgram.uniforms.uTexture, last.attach(0));
-    gl.uniform1f(bloomFinalProgram.uniforms.intensity, config.BLOOM_INTENSITY);
+    const glowFade = Math.max(0, 1 - (performance.now() - audioGlowStartTime) / 1000);
+    const bloomIntensity = Math.min(4, config.BLOOM_INTENSITY + audioGlowStrength * glowFade);
+    gl.uniform1f(bloomFinalProgram.uniforms.intensity, bloomIntensity);
     blit(destination);
 }
 
@@ -1419,8 +1838,8 @@ function blur (target, temp, iterations) {
 }
 
 function splatPointer (pointer) {
-    let dx = pointer.deltaX * config.SPLAT_FORCE;
-    let dy = pointer.deltaY * config.SPLAT_FORCE;
+    let dx = pointer.deltaX * config.SPLAT_FORCE * getProfileIntensity();
+    let dy = pointer.deltaY * config.SPLAT_FORCE * getProfileIntensity();
     splat(pointer.texcoordX, pointer.texcoordY, dx, dy, pointer.color);
 }
 
@@ -1438,7 +1857,7 @@ function multipleSplats (amount) {
     }
 }
 
-function splat (x, y, dx, dy, color) {
+function splat (x, y, dx, dy, color, allowGelatinRebound = true) {
     splatProgram.bind();
     gl.uniform1i(splatProgram.uniforms.uTarget, velocity.read.attach(0));
     gl.uniform1f(splatProgram.uniforms.aspectRatio, canvas.width / canvas.height);
@@ -1448,10 +1867,20 @@ function splat (x, y, dx, dy, color) {
     blit(velocity.write);
     velocity.swap();
 
-    gl.uniform1i(splatProgram.uniforms.uTarget, dye.read.attach(0));
-    gl.uniform3f(splatProgram.uniforms.color, color.r, color.g, color.b);
-    blit(dye.write);
-    dye.swap();
+    if (color) {
+        gl.uniform1i(splatProgram.uniforms.uTarget, dye.read.attach(0));
+        gl.uniform3f(splatProgram.uniforms.color, color.r, color.g, color.b);
+        blit(dye.write);
+        dye.swap();
+    }
+
+    const now = performance.now();
+    if (allowGelatinRebound && config.FLUID_PROFILE === 'gelatin' && Math.hypot(dx, dy) > 80 && (lastGelReboundQueued === 0 || now - lastGelReboundQueued > 100)) {
+        gelRebounds.push({ x, y, dx: -dx * 0.72, dy: -dy * 0.72, time: now + 220 });
+        lastGelReboundQueued = now;
+        if (gelRebounds.length > 32)
+            gelRebounds.shift();
+    }
 }
 
 function correctRadius (radius) {
@@ -1472,10 +1901,26 @@ canvas.addEventListener('mousedown', e => {
 
 canvas.addEventListener('mousemove', e => {
     let pointer = pointers[0];
-    if (!pointer.down) return;
     let posX = scaleByPixelRatio(e.offsetX);
     let posY = scaleByPixelRatio(e.offsetY);
+    if (!pointer.hasPosition) {
+        updatePointerDownData(pointer, -1, posX, posY);
+        pointer.down = false;
+        return;
+    }
+    if (!pointer.down && config.CURSOR_MODE === 'press') {
+        updatePointerMoveData(pointer, posX, posY);
+        pointer.moved = false;
+        return;
+    }
     updatePointerMoveData(pointer, posX, posY);
+});
+
+canvas.addEventListener('mouseleave', () => {
+    if (!pointers[0].down) {
+        pointers[0].hasPosition = false;
+        pointers[0].moved = false;
+    }
 });
 
 window.addEventListener('mouseup', () => {
@@ -1525,6 +1970,7 @@ window.addEventListener('keydown', e => {
 
 function updatePointerDownData (pointer, id, posX, posY) {
     pointer.id = id;
+    pointer.hasPosition = true;
     pointer.down = true;
     pointer.moved = false;
     pointer.texcoordX = posX / canvas.width;
@@ -1537,6 +1983,8 @@ function updatePointerDownData (pointer, id, posX, posY) {
 }
 
 function updatePointerMoveData (pointer, posX, posY) {
+    pointer.hasPosition = true;
+    pointer.lastMoveTime = performance.now();
     pointer.prevTexcoordX = pointer.texcoordX;
     pointer.prevTexcoordY = pointer.texcoordY;
     pointer.texcoordX = posX / canvas.width;
@@ -1563,6 +2011,26 @@ function correctDeltaY (delta) {
 }
 
 function generateColor () {
+    if (config.USE_FIXED_FLUID_COLOR) {
+        const fixed = normalizeColor(config.FIXED_FLUID_COLOR);
+        const brightness = 0.15 * (config.FLUID_PROFILE === 'smoke' ? config.SMOKE_BRIGHTNESS : 1);
+        return {
+            r: fixed.r * brightness,
+            g: fixed.g * brightness,
+            b: fixed.b * brightness
+        };
+    }
+
+    if (activeProfileColor) {
+        const variation = 0.9 + Math.random() * 0.2;
+        const brightness = config.FLUID_PROFILE === 'smoke' ? config.SMOKE_BRIGHTNESS : 1;
+        return {
+            r: activeProfileColor.r * variation * brightness,
+            g: activeProfileColor.g * variation * brightness,
+            b: activeProfileColor.b * variation * brightness
+        };
+    }
+
     let c = HSVtoRGB(Math.random(), 1.0, 1.0);
     c.r *= 0.15;
     c.g *= 0.15;
