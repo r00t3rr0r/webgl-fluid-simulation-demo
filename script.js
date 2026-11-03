@@ -90,6 +90,7 @@ let config = {
     SUNRAYS_WEIGHT: 1.0,
     AUDIO_SOURCE: 'system',
     AUDIO_SENSITIVITY: 1.0,
+    TONREACT: false,
 }
 
 const fluidProfiles = {
@@ -166,6 +167,42 @@ const fluidProfiles = {
         BLOOM_THRESHOLD: 0.3,
         SUNRAYS: true,
         SUNRAYS_WEIGHT: 0.95,
+        color: null,
+    },
+    audioPulse: {
+        DENSITY_DISSIPATION: 1.4,
+        VELOCITY_DISSIPATION: 0.5,
+        PRESSURE: 0.88,
+        CURL: 48,
+        SPLAT_RADIUS: 0.14,
+        SPLAT_FORCE: 7200,
+        COLORFUL: true,
+        USE_FIXED_FLUID_COLOR: false,
+        BLOOM: true,
+        BLOOM_INTENSITY: 1.6,
+        BLOOM_THRESHOLD: 0.3,
+        SUNRAYS: false,
+        SUNRAYS_WEIGHT: 0.6,
+        AUDIO_SENSITIVITY: 1.65,
+        TONREACT: false,
+        color: null,
+    },
+    audioFlow: {
+        DENSITY_DISSIPATION: 0.3,
+        VELOCITY_DISSIPATION: 0.3,
+        PRESSURE: 0.94,
+        CURL: 18,
+        SPLAT_RADIUS: 0.32,
+        SPLAT_FORCE: 3600,
+        COLORFUL: true,
+        USE_FIXED_FLUID_COLOR: false,
+        BLOOM: true,
+        BLOOM_INTENSITY: 0.65,
+        BLOOM_THRESHOLD: 0.55,
+        SUNRAYS: true,
+        SUNRAYS_WEIGHT: 0.55,
+        AUDIO_SENSITIVITY: 0.85,
+        TONREACT: true,
         color: null,
     },
     gelatin: {
@@ -402,7 +439,7 @@ function getProfileIntensity () {
 
 function startGUI () {
     var gui = new dat.GUI({ width: 300 });
-    gui.add(config, 'FLUID_PROFILE', { 'custom': 'custom', 'smoke': 'smoke', 'water': 'water', 'ink': 'ink', 'neon': 'neon', 'evolving': 'evolving', 'ballistic gelatin': 'gelatin' }).name('fluid profile').onChange(applyFluidProfile);
+    gui.add(config, 'FLUID_PROFILE', { 'custom': 'custom', 'smoke': 'smoke', 'water': 'water', 'ink': 'ink', 'neon': 'neon', 'evolving': 'evolving', 'audio pulse': 'audioPulse', 'audio flow': 'audioFlow', 'ballistic gelatin': 'gelatin' }).name('fluid profile').onChange(applyFluidProfile);
     gui.add(config, 'DYE_RESOLUTION', { 'high': 1024, 'medium': 512, 'low': 256, 'very low': 128 }).name('quality').onFinishChange(initFramebuffers);
     gui.add(config, 'SIM_RESOLUTION', { '32': 32, '64': 64, '128': 128, '256': 256 }).name('sim resolution').onFinishChange(initFramebuffers);
     gui.add(config, 'DENSITY_DISSIPATION', 0, 4.0).name('density diffusion').listen();
@@ -425,8 +462,9 @@ function startGUI () {
 
     let audioFolder = gui.addFolder('Audio input');
     audioFolder.add(config, 'AUDIO_SOURCE', { 'system audio': 'system', 'microphone': 'microphone' }).name('source');
+    audioFolder.add(config, 'TONREACT').name('Tonreact').listen();
     audioController = audioFolder.add({ fun: () => { toggleAudioCapture(); } }, 'fun').name('Start audio response');
-    audioFolder.add(config, 'AUDIO_SENSITIVITY', 0.2, 3.0).name('sensitivity');
+    audioFolder.add(config, 'AUDIO_SENSITIVITY', 0.2, 3.0).name('sensitivity').listen();
     audioFolder.add(audioMeter, 'level', 0, 1).name('input level').listen();
 
     let bloomFolder = gui.addFolder('Bloom');
@@ -585,8 +623,9 @@ function updateAudioReaction () {
     const now = performance.now();
     const fluxThreshold = Math.max(0.012, audioFluxBaseline * 1.4);
     const beat = spectralFlux > fluxThreshold && audioLevel > 0.008 / config.AUDIO_SENSITIVITY;
+    const soundActive = audioLevel > 0.008 / config.AUDIO_SENSITIVITY;
     audioFluxBaseline = audioFluxBaseline * 0.92 + spectralFlux * 0.08;
-    if (!beat || now - lastAudioSplatTime < 100) return;
+    if ((config.TONREACT ? !soundActive : !beat) || now - lastAudioSplatTime < 100) return;
 
     const minToneBin = Math.max(1, Math.floor(80 * audioAnalyser.fftSize / audioContext.sampleRate));
     const maxToneBin = Math.min(audioFrequencies.length, Math.ceil(1800 * audioAnalyser.fftSize / audioContext.sampleRate));
